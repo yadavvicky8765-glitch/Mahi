@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#05060d">
 <meta name="mobile-web-app-capable" content="yes">
 <title>Mahi AI</title>
+<link rel="manifest" href="manifest.json">
 <style>
 :root{--bg:#05060d;--fg:#e8ecff;--dim:#7d86b3}
 html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,sans-serif}
@@ -16,6 +17,7 @@ h1{margin:0;font-size:22px;font-weight:600;letter-spacing:.5px}
 canvas{width:min(80vw,340px);height:min(80vw,340px);border-radius:50%;box-shadow:0 0 60px var(--glow,#3b6bff55)}
 #said{max-width:340px;text-align:center;font-size:16px;min-height:44px;line-height:1.4}
 button{font:inherit;color:var(--fg);background:#161a33;border:1px solid #2c3366;border-radius:999px;padding:14px 28px;margin:6px}
+button:focus-visible{outline:2px solid #6df0ff}
 #go{background:#3b6bff;border-color:#3b6bff;font-weight:600}
 .row{display:flex;flex-wrap:wrap;justify-content:center}
 </style>
@@ -78,56 +80,67 @@ function frame(){
 }
 frame();
 
-/* ---------- बोलना (पहले Gemini की प्यारी आवाज़, न चले तो फ़ोन की आवाज़) ---------- */
-let actx=null;
+/* ---------- बोलना (Gemini की आवाज़, न चले तो फ़ोन की आवाज़) ---------- */
+let actx=null,ignoreUntil=0;
+const cache=new Map();
 function b64pcm(b64){const bin=atob(b64),n=bin.length>>1,f=new Float32Array(n);
   for(let i=0;i<n;i++){let v=bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8);if(v>32767)v-=65536;f[i]=v/32768}return f}
-async function geminiVoice(t){
-  const key=localStorage.getItem('k');if(!key||!actx)return false;
+async function getBuf(t){
+  if(cache.has(t))return cache.get(t);
+  const key=localStorage.getItem('k');if(!key||!actx)return null;
   for(const mdl of ['gemini-3.1-flash-tts-preview','gemini-2.5-flash-preview-tts']){
     try{
-      const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+mdl+':generateContent?key='+encodeURIComponent(key),{method:'POST',
+      const ac=new AbortController(),tm=setTimeout(()=>ac.abort(),8000);
+      const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+mdl+':generateContent?key='+encodeURIComponent(key),{method:'POST',signal:ac.signal,
         headers:{'content-type':'application/json'},
-        body:JSON.stringify({contents:[{parts:[{text:'प्यार से, मीठी और दोस्ताना आवाज़ में कहो: '+t}]}],
+        body:JSON.stringify({contents:[{parts:[{text:'प्यार से, मीठी आवाज़ में कहो: '+t}]}],
           generationConfig:{responseModalities:['AUDIO'],speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:'Aoede'}}}}})});
+      clearTimeout(tm);
       const d=await r.json();
       const p=d.candidates&&d.candidates[0]&&d.candidates[0].content.parts.find(x=>x.inlineData);
       if(!p)continue;
       const pcm=b64pcm(p.inlineData.data),buf=actx.createBuffer(1,pcm.length,24000);
       buf.copyToChannel(pcm,0);
-      await actx.resume();
-      await new Promise(res=>{const src=actx.createBufferSource();src.buffer=buf;src.connect(actx.destination);src.onended=res;src.start()});
-      return true;
+      if(cache.size<40)cache.set(t,buf);
+      return buf;
     }catch(e){}
   }
-  return false}
+  return null}
+async function geminiVoice(t){
+  const buf=await getBuf(t);if(!buf)return false;
+  await actx.resume();
+  await new Promise(res=>{const src=actx.createBufferSource();src.buffer=buf;src.connect(actx.destination);src.onended=res;src.start()});
+  return true}
 function robotVoice(t){return new Promise(res=>{
   if(!('speechSynthesis' in window))return res();
   const u=new SpeechSynthesisUtterance(t);u.lang='hi-IN';u.rate=1;u.pitch=1.1;
   const v=speechSynthesis.getVoices().find(v=>v.lang&&v.lang.toLowerCase().replace('_','-').startsWith('hi'));
   if(v)u.voice=v;u.onend=res;u.onerror=res;speechSynthesis.speak(u)})}
 async function speak(t){
+  const activeWas=Date.now()<activeUntil;
   $('said').textContent=t;speaking=true;setMode('speaking','बोल रहा हूँ…');
-  try{rec&&rec.stop()}catch(e){}
   try{speechSynthesis.cancel()}catch(e){}
   let ok=false;try{ok=await geminiVoice(t)}catch(e){}
   if(!ok)await robotVoice(t);
-  speaking=false;
+  speaking=false;ignoreUntil=Date.now()+1200;
+  if(activeWas)activeUntil=Date.now()+9000;
   if(on){const w=Date.now()<activeUntil;setMode(w?'active':'idle',w?'सुन रहा हूँ…':"'माही' बोलकर बुलाइए");startRec()}
 }
 
-/* ---------- सुनना ---------- */
+/* ---------- सुनना (माइक एक बार चालू, बार-बार बंद नहीं) ---------- */
+let recOn=false;
 function startRec(){
-  if(!SR){speak('इस ब्राउज़र में आवाज़ पहचान नहीं है। Chrome इस्तेमाल कीजिए।');return}
-  try{rec&&rec.abort()}catch(e){}
+  if(!SR){on=false;speak('इस ब्राउज़र में आवाज़ पहचान नहीं है। Chrome इस्तेमाल कीजिए।');return}
+  if(recOn)return;
   rec=new SR();rec.lang='hi-IN';rec.continuous=true;rec.interimResults=false;
+  rec.onstart=()=>{recOn=true};
   rec.onresult=e=>{
-    if(speaking)return;
+    if(speaking||Date.now()<ignoreUntil)return;
     const t=e.results[e.results.length-1][0].transcript.trim();
     if(t)heard(t)};
-  rec.onerror=e=>{if(e.error==='not-allowed'){on=false;setMode('off','माइक की अनुमति दीजिए')}};
-  rec.onend=()=>{if(on&&!speaking)setTimeout(()=>{try{rec.start()}catch(e){}},250)};
-  try{rec.start()}catch(e){}
+  rec.onerror=e=>{if(e.error==='not-allowed'||e.error==='service-not-allowed'){on=false;setMode('off','माइक की अनुमति दीजिए')}};
+  rec.onend=()=>{recOn=false;if(on)setTimeout(startRec,300)};
+  try{rec.start()}catch(e){recOn=false}
 }
 const WAKE=/(mahi|maahi|mahee|माही|माहि|महि|मही|माई)/i;
 function heard(t){
@@ -137,46 +150,50 @@ function heard(t){
     const cmd=t.replace(WAKE,'').replace(/^[\s,.\-]+/,'').trim();
     activeUntil=Date.now()+12000;
     cmd.length>1?run(cmd):(setMode('active','सुन रहा हूँ…'),speak('जी, बोलिए'));
-  }else if(inWindow){run(t)}
+  }else if(inWindow&&t.length>2){run(t)}
 }
 
 /* ---------- काम करना ---------- */
-function go(url,delay=1800){setTimeout(()=>{location.href=url},delay)}
+function go(url,delay=300){setTimeout(()=>{location.href=url},delay)}
 async function run(c){
   const s=c.toLowerCase();activeUntil=Date.now()+12000;
   if(/(यूट्यूब|यू ट्यूब|youtube|यूटयूब)/i.test(s)){
     const q=s.replace(/(यूट्यूब|यू ट्यूब|youtube|यूटयूब|खोजो|खोज|ढूंढो|ढूंढ|चलाओ|चला|जाओ|जाकर|पर|में|वीडियो|video|को|इस|दो|करो|कर|का|की|के|search|play|open|खोलो)/gi,' ').replace(/\s+/g,' ').trim();
-    if(!q){await speak('यूट्यूब खोल रहा हूँ');return go('https://www.youtube.com',300)}
-    await speak('यूट्यूब पर '+q+' खोज रहा हूँ');return go('https://www.youtube.com/results?search_query='+encodeURIComponent(q),300)}
+    await speak('ठीक है');
+    return go(q?'https://www.youtube.com/results?search_query='+encodeURIComponent(q):'https://www.youtube.com')}
   let m;
   if((m=s.match(/(कॉल|call|फोन|फ़ोन).*?([\d\s]{8,})/))){
-    const n=m[2].replace(/\s/g,'');await speak('कॉल लगा रहा हूँ');return go('tel:'+n,300)}
-  if(/(व्हाट्सएप|व्हाट्सऐप|whatsapp)/i.test(s)){await speak('व्हाट्सएप खोल रहा हूँ');return go('https://wa.me/',300)}
+    const n=m[2].replace(/\s/g,'');await speak('ठीक है');return go('tel:'+n)}
+  if(/(व्हाट्सएप|व्हाट्सऐप|whatsapp)/i.test(s)){await speak('ठीक है');return go('https://wa.me/')}
   if(/(मैप|नक्शा|रास्ता|map)/i.test(s)){
     const q=s.replace(/(मैप्स|मैप|नक्शा|रास्ता|map|maps|दिखाओ|खोलो|पर|में|का|की|के)/gi,' ').trim();
-    await speak('मैप खोल रहा हूँ');return go('https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q),300)}
+    await speak('ठीक है');return go('https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q))}
   if(/(गूगल|google|सर्च)/i.test(s)){
     const q=s.replace(/(गूगल|google|सर्च|search|पर|में|खोजो|खोज|करो|कर)/gi,' ').replace(/\s+/g,' ').trim();
-    await speak('गूगल पर खोज रहा हूँ');return go('https://www.google.com/search?q='+encodeURIComponent(q),300)}
+    await speak('ठीक है');return go('https://www.google.com/search?q='+encodeURIComponent(q))}
   if(/(समय|टाइम|time|कितने बजे)/i.test(s)){
     return speak('अभी '+new Date().toLocaleTimeString('hi-IN',{hour:'numeric',minute:'2-digit'})+' हुए हैं')}
   const key=localStorage.getItem('k');
   if(!key)return speak('यह काम सीखने के लिए ऊपर API Key बटन से अपनी Google की चाबी डालिए');
   setMode('active','सोच रहा हूँ…');
-  try{
-    const sys='तुम "माही" हो, एक दोस्ताना आवाज़ वाला असिस्टेंट। हमेशा सरल हिंदी में, 1-3 छोटे वाक्यों में जवाब दो। कोई markdown, स्टार या इमोजी नहीं।';
-    let txt=null,err='';
-    for(const mdl of ['gemini-flash-latest','gemini-2.5-flash','gemini-2.0-flash']){
-      const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+mdl+':generateContent?key='+encodeURIComponent(key),{method:'POST',
+  const sys='तुम "माही" हो, एक दोस्ताना आवाज़ वाला असिस्टेंट। सरल हिंदी में सिर्फ़ 1-2 बहुत छोटे वाक्यों में, 25 शब्दों से कम में जवाब दो। कोई markdown, स्टार या इमोजी नहीं।';
+  let txt=null,err='';
+  for(const mdl of ['gemini-2.5-flash-lite','gemini-2.5-flash','gemini-flash-latest']){
+    try{
+      const ac=new AbortController(),tm=setTimeout(()=>ac.abort(),10000);
+      const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+mdl+':generateContent?key='+encodeURIComponent(key),{method:'POST',signal:ac.signal,
         headers:{'content-type':'application/json'},
-        body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},contents:[{role:'user',parts:[{text:c}]}]})});
+        body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},contents:[{role:'user',parts:[{text:c}]}],
+          generationConfig:{maxOutputTokens:160,temperature:.8,thinkingConfig:{thinkingBudget:0}}})});
+      clearTimeout(tm);
       const d=await r.json();
-      if(d.candidates&&d.candidates[0]){txt=d.candidates[0].content.parts.map(x=>x.text||'').join(' ').replace(/[*#_`]/g,'');break}
+      if(d.candidates&&d.candidates[0]&&d.candidates[0].content&&d.candidates[0].content.parts){
+        txt=d.candidates[0].content.parts.map(x=>x.text||'').join(' ').replace(/[*#_`]/g,'');break}
       err=(d.error&&d.error.message)||'';
-      if(r.status===400||r.status===403)break;
-    }
-    speak(txt||('जवाब नहीं मिला। '+(err.includes('API key')?'चाबी गलत है':'')));
-  }catch(e){speak('इंटरनेट या चाबी की दिक्कत है')}
+      if(r.status===403||/API key/i.test(err))break;
+    }catch(e){err='net'}
+  }
+  speak(txt||(/API key/i.test(err)?'चाबी गलत है':'जवाब नहीं मिला, दोबारा बोलिए'));
 }
 
 /* ---------- बटन ---------- */
@@ -185,9 +202,11 @@ $('go').onclick=async()=>{
   if(!on){
     on=true;$('go').textContent='रोको';
     try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+    startRec();
+    ['जी, बोलिए','ठीक है'].forEach(x=>getBuf(x));
     setMode('idle',"'माही' बोलकर बुलाइए");speak('नमस्ते, मैं माही हूँ। बुलाइए तो सही।');
   }else{
-    on=false;$('go').textContent='शुरू करो';speechSynthesis.cancel();
+    on=false;$('go').textContent='शुरू करो';try{speechSynthesis.cancel()}catch(e){}
     try{rec.abort()}catch(e){}try{wake&&wake.release()}catch(e){}
     setMode('off','रुका हुआ है')}
 };
@@ -198,6 +217,7 @@ $('key').onclick=()=>{
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden&&on){try{navigator.wakeLock.request('screen').then(w=>wake=w)}catch(e){}startRec()}
 });
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
 </script>
 </body>
-    </html>
+</html>
