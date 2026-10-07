@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#05060d">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Mahi AI</title>
+<style>
+:root{--bg:#05060d;--fg:#e8ecff;--dim:#7d86b3}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,sans-serif}
+body{display:flex;flex-direction:column;align-items:center;justify-content:space-between;box-sizing:border-box;padding:calc(env(safe-area-inset-top,0px) + 20px) 18px calc(env(safe-area-inset-bottom,0px) + 20px)}
+h1{margin:0;font-size:22px;font-weight:600;letter-spacing:.5px}
+#status{color:var(--dim);font-size:15px;margin-top:6px;text-align:center;min-height:22px}
+#orbwrap{flex:1;display:flex;align-items:center;justify-content:center;width:100%}
+canvas{width:min(80vw,340px);height:min(80vw,340px);border-radius:50%;box-shadow:0 0 60px var(--glow,#3b6bff55)}
+#said{max-width:340px;text-align:center;font-size:16px;min-height:44px;line-height:1.4}
+button{font:inherit;color:var(--fg);background:#161a33;border:1px solid #2c3366;border-radius:999px;padding:14px 28px;margin:6px}
+#go{background:#3b6bff;border-color:#3b6bff;font-weight:600}
+.row{display:flex;flex-wrap:wrap;justify-content:center}
+</style>
+</head>
+<body>
+<div style="text-align:center"><h1>Mahi AI</h1><div id="status">शुरू करने के लिए बटन दबाइए</div></div>
+<div id="orbwrap"><canvas id="c" width="680" height="680"></canvas></div>
+<div id="said"></div>
+<div class="row">
+  <button id="go">शुरू करो</button>
+  <button id="key">API Key</button>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let on=false,speaking=false,activeUntil=0,rec=null,mode='off',wake=null;
+
+/* ---------- Orb: कण गोले के अंदर टकराते हैं ---------- */
+const cv=$('c'),ctx=cv.getContext('2d'),W=680,R=W/2-6;
+const P=Array.from({length:34},()=>{const a=Math.random()*6.28,d=Math.random()*R*.7;
+  return{x:W/2+Math.cos(a)*d,y:W/2+Math.sin(a)*d,vx:(Math.random()-.5)*3,vy:(Math.random()-.5)*3,r:7+Math.random()*9}});
+const COL={off:[120,130,200],idle:[80,140,255],active:[90,240,200],speaking:[200,110,255]};
+let cur=[120,130,200];
+function setMode(m,t){mode=m;if(t)$('status').textContent=t}
+function frame(){
+  const spd={off:.5,idle:1,active:2.2,speaking:3}[mode];
+  const tg=COL[mode];cur=cur.map((v,i)=>v+(tg[i]-v)*.06);
+  const col=`${cur[0]|0},${cur[1]|0},${cur[2]|0}`;
+  cv.style.setProperty('--glow',`rgba(${col},.35)`);
+  ctx.clearRect(0,0,W,W);
+  ctx.save();ctx.beginPath();ctx.arc(W/2,W/2,R,0,6.28);ctx.clip();
+  const g=ctx.createRadialGradient(W/2,W/2,R*.1,W/2,W/2,R);
+  g.addColorStop(0,`rgba(${col},.18)`);g.addColorStop(1,'rgba(5,6,13,.95)');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,W);
+  for(const p of P){
+    p.x+=p.vx*spd;p.y+=p.vy*spd;
+    const dx=p.x-W/2,dy=p.y-W/2,d=Math.hypot(dx,dy);
+    if(d+p.r>R){const nx=dx/d,ny=dy/d,dot=p.vx*nx+p.vy*ny;
+      if(dot>0){p.vx-=2*dot*nx;p.vy-=2*dot*ny}
+      p.x=W/2+nx*(R-p.r);p.y=W/2+ny*(R-p.r)}
+  }
+  for(let i=0;i<P.length;i++)for(let j=i+1;j<P.length;j++){
+    const a=P[i],b=P[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),m=a.r+b.r;
+    if(d<m&&d>0){const nx=dx/d,ny=dy/d,rel=(a.vx-b.vx)*nx+(a.vy-b.vy)*ny;
+      if(rel>0){a.vx-=rel*nx;a.vy-=rel*ny;b.vx+=rel*nx;b.vy+=rel*ny}
+      const o=(m-d)/2;a.x-=nx*o;a.y-=ny*o;b.x+=nx*o;b.y+=ny*o;
+      ctx.beginPath();ctx.arc((a.x+b.x)/2,(a.y+b.y)/2,m*.9,0,6.28);
+      ctx.fillStyle=`rgba(${col},.25)`;ctx.fill()}
+    const sp=Math.hypot(a.vx,a.vy);if(sp<.8){a.vx*=1.05;a.vy*=1.05}
+  }
+  for(const p of P){
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,6.28);
+    ctx.shadowColor=`rgb(${col})`;ctx.shadowBlur=18;
+    ctx.fillStyle=`rgb(${col})`;ctx.fill();ctx.shadowBlur=0}
+  ctx.restore();
+  ctx.beginPath();ctx.arc(W/2,W/2,R,0,6.28);
+  ctx.strokeStyle=`rgba(${col},.8)`;ctx.lineWidth=4;ctx.stroke();
+  requestAnimationFrame(frame)
+}
+frame();
+
+/* ---------- बोलना (पहले Gemini की प्यारी आवाज़, न चले तो फ़ोन की आवाज़) ---------- */
+let actx=null;
+function b64pcm(b64){const bin=atob(b64),n=bin.length>>1,f=new Float32Array(n);
+  for(let i=0;i<n;i++){let v=bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8);if(v>32767)v-=65536;f[i]=v/32768}return f}
+async function geminiVoice(t){
+  const key=localStorage.getItem('k');if(!key||!actx)return false;
+  for(const mdl of ['gemini-3.1-flash-tts-preview','gemini-2.5-flash-preview-tts']){
+    try{
+      const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+mdl+':generateContent?key='+encodeURIComponent(key),{method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({contents:[{parts:[{text:'प्यार से, मीठी और दोस्ताना आवाज़ में कहो: '+t}]}],
+          generationConfig:{responseModalities:['AUDIO'],speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:'Aoede'}}}}})});
+      const d=await r.json();
+      const p=d.candidates&&d.candidates[0]&&d.candidates[0].content.parts.find(x=>x.inlineData);
+      if(!p)continue;
+      const pcm=b64pcm(p.inlineData.data),buf=actx.createBuffer(1,pcm.length,24000);
+      buf.copyToChannel(pcm,0);
+      await actx.resume();
+      await new Promise(res=>{const src=actx.createBufferSource();src.buffer=buf;src.connect(actx.destination);src.onended=res;src.start()});
+      return true;
+    }catch(e){}
+  }
+  return false}
+function robotVoice(t){return new Promise(res=>{
+  if(!('speechSynthesis' in window))return res();
+  const u=new SpeechSynthesisUtterance(t);u.lang='hi-IN';u.rate=1;u.pitch=1.1;
+  const v=speechSynthesis.getVoices().find(v=>v.lang&&v.lang.toLowerCase().replace('_','-').startsWith('hi'));
+  if(v)u.voice=v;u.onend=res;u.onerror=res;speechSynthesis.speak(u)})}
+async function speak(t){
+  $('said').textContent=t;speaking=true;setMode('speaking','बोल रहा हूँ…');
+  try{rec&&rec.stop()}catch(e){}
+  try{speechSynthesis.cancel()}catch(e){}
+  let ok=false;try{ok=await geminiVoice(t)}catch(e){}
+  if(!ok)await robotVoice(t);
+  speaking=false;
+  if(on){const w=Date.now()<activeUntil;setMode(w?'active':'idle',w?'सुन रहा हूँ…':"'माही' बोलकर बुलाइए");startRec()}
+}
+
+/* ---------- सुनना ---------- */
+function startRec(){
+  if(!SR){speak('इस ब्राउज़र में आवाज़ पहचान नहीं है। Chrome इस्तेमाल कीजिए।');return}
+  try{rec&&rec.abort()}catch(e){}
+  rec=new SR();rec.lang='hi-IN';rec.continuous=true;rec.interimResults=false;
+  rec.onresult=e=>{
+    if(speaking)return;
+    const t=e.results[e.results.length-1][0].transcript.trim();
+    if(t)heard(t)};
+  rec.onerror=e=>{if(e.error==='not-allowed'){on=false;setMode('off','माइक की अनुमति दीजिए')}};
+  rec.onend=()=>{if(on&&!speaking)setTimeout(()=>{try{rec.start()}catch(e){}},250)};
+  try{rec.start()}catch(e){}
+}
+const WAKE=/(mahi|maahi|mahee|माही|माहि|महि|मही|माई)/i;
+function heard(t){
+  $('said').textContent='"'+t+'"';
+  const inWindow=Date.now()<activeUntil;
+  if(WAKE.test(t)){
+    const cmd=t.replace(WAKE,'').replace(/^[\s,.\-]+/,'').trim();
+    activeUntil=Date.now()+12000;
+    cmd.length>1?run(cmd):(setMode('active','सुन रहा हूँ…'),speak('जी, बोलिए'));
+  }else if(inWindow){run(t)}
+}
+
+/* ---------- काम करना ---------- */
+function go(url,delay=1800){setTimeout(()=>{location.href=url},delay)}
+async function run(c){
+  const s=c.toLowerCase();activeUntil=Date.now()+12000;
+  if(/(यूट्यूब|यू ट्यूब|youtube|यूटयूब)/i.test(s)){
+    const q=s.replace(/(यूट्यूब|यू ट्यूब|youtube|यूटयूब|खोजो|खोज|ढूंढो|ढूंढ|चलाओ|चला|जाओ|जाकर|पर|में|वीडियो|video|को|इस|दो|करो|कर|का|की|के|search|play|open|खोलो)/gi,' ').replace(/\s+/g,' ').trim();
+    if(!q){await speak('यूट्यूब खोल रहा हूँ');return go('https://www.youtube.com',300)}
+    await speak('यूट्यूब पर '+q+' खोज रहा हूँ');return go('https://www.youtube.com/results?search_query='+encodeURIComponent(q),300)}
+  let m;
+  if((m=s.match(/(कॉल|call|फोन|फ़ोन).*?([\d\s]{8,})/))){
+    const n=m[2].replace(/\s/g,'');await speak('कॉल लगा रहा हूँ');return go('tel:'+n,300)}
+  if(/(व्हाट्सएप|व्हाट्सऐप|whatsapp)/i.test(s)){await speak('व्हाट्सएप खोल रहा हूँ');return go('https://wa.me/',300)}
+  if(/(मैप|नक्शा|रास्ता|map)/i.test(s)){
+    const q=s.replace(/(मैप्स|मैप|नक्शा|रास्ता|map|maps|दिखाओ|खोलो|पर|में|का|की|के)/gi,' ').trim();
+    await speak('मैप खोल रहा हूँ');return go('https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q),300)}
+  if(/(गूगल|google|सर्च)/i.test(s)){
+    const q=s.replace(/(गूगल|google|सर्च|search|पर|में|खोजो|खोज|करो|कर)/gi,' ').replace(/\s+/g,' ').trim();
+    await speak('गूगल पर खोज रहा हूँ');return go('https://www.google.com/search?q='+encodeURIComponent(q),300)}
+  if(/(समय|टाइम|time|कितने बजे)/i.test(s)){
+    return speak('अभी '+new Date().toLocaleTimeString('hi-IN',{hour:'numeric',minute:'2-digit'})+' हुए हैं')}
+  const key=localStorage.getItem('k');
+  if(!key)return speak('यह काम सीखने के लिए ऊपर API Key बटन से अपनी Google की चाबी डालिए');
+  setMode('active','सोच रहा हूँ…');
+  try{
+    const sys='तुम "माही" हो, एक दोस्ताना आवाज़ वाला असिस्टेंट। हमेशा सरल हिंदी में, 1-3 छोटे वाक्यों में जवाब दो। कोई markdown, स्टार या इमोजी नहीं।';
+    let txt=null,err='';
+    for(const mdl of ['gemini-flash-latest','gemini-2.5-flash','gemini-2.0-flash']){
+      const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+mdl+':generateContent?key='+encodeURIComponent(key),{method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},contents:[{role:'user',parts:[{text:c}]}]})});
+      const d=await r.json();
+      if(d.candidates&&d.candidates[0]){txt=d.candidates[0].content.parts.map(x=>x.text||'').join(' ').replace(/[*#_`]/g,'');break}
+      err=(d.error&&d.error.message)||'';
+      if(r.status===400||r.status===403)break;
+    }
+    speak(txt||('जवाब नहीं मिला। '+(err.includes('API key')?'चाबी गलत है':'')));
+  }catch(e){speak('इंटरनेट या चाबी की दिक्कत है')}
+}
+
+/* ---------- बटन ---------- */
+$('go').onclick=async()=>{
+  try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();await actx.resume()}catch(e){}
+  if(!on){
+    on=true;$('go').textContent='रोको';
+    try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+    setMode('idle',"'माही' बोलकर बुलाइए");speak('नमस्ते, मैं माही हूँ। बुलाइए तो सही।');
+  }else{
+    on=false;$('go').textContent='शुरू करो';speechSynthesis.cancel();
+    try{rec.abort()}catch(e){}try{wake&&wake.release()}catch(e){}
+    setMode('off','रुका हुआ है')}
+};
+$('key').onclick=()=>{
+  const k=prompt('अपनी Google (Gemini) API Key यहाँ चिपकाइए (सिर्फ़ इसी फ़ोन में रहेगी):',localStorage.getItem('k')||'');
+  if(k!==null){localStorage.setItem('k',k.trim());speak('चाबी सेव हो गई')}
+};
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&on){try{navigator.wakeLock.request('screen').then(w=>wake=w)}catch(e){}startRec()}
+});
+</script>
+</body>
+    </html>
